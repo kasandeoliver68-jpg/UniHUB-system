@@ -44,9 +44,10 @@ try {
                 $role = substr($email, -strlen($adminSuffix)) === $adminSuffix ? 'admin' : 'member';
                 $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $university['id'], $listingKey, $role]);
                 $id = (int) db()->lastInsertId();
-                issue_otp($id, $email);
+                $otp = issue_otp($id, $email);
                 $_SESSION['user_id'] = $id;
-                flash('success', 'Account created. Use the verification code shown below for local testing.');
+                $_SESSION['otp_display'] = $otp;
+                flash('success', 'Account created. Check your email for a verification code.');
                 redirect('verify');
 
             case 'login':
@@ -83,31 +84,34 @@ try {
                 }
                 $stmt = db()->prepare('UPDATE users SET verified_at = NOW(), otp_code_hash = NULL, otp_expires_at = NULL WHERE id = ?');
                 $stmt->execute([$user['id']]);
-                unset($_SESSION['last_otp']);
+                unset($_SESSION['otp_display']);
                 flash('success', 'Email verified. You are inside your university hub.');
                 redirect('dashboard');
 
             case 'resend-otp':
                 $user = current_user();
                 if ($user) {
-                    issue_otp((int) $user['id'], $user['email']);
-                    flash('info', 'A new local testing OTP has been generated.');
+                    $otp = issue_otp((int) $user['id'], $user['email']);
+                    $_SESSION['otp_display'] = $otp;
+                    flash('info', 'A new verification code has been sent to your email.');
                 }
                 redirect('verify');
 
             case 'event-save':
                 $user = require_admin();
                 $id = (int) ($_POST['id'] ?? 0);
-                $eventDate = str_replace('T', ' ', trim($_POST['event_date'] ?? ''));
+                $eventDate = trim($_POST['event_date'] ?? '');
+                $eventTime = trim($_POST['event_time'] ?? '');
+                $combinedDateTime = $eventDate && $eventTime ? $eventDate . ' ' . $eventTime : '';
                 $data = [
                     trim($_POST['title'] ?? ''),
                     trim($_POST['description'] ?? ''),
-                    $eventDate,
+                    $combinedDateTime,
                     trim($_POST['location'] ?? ''),
                     $user['university_id'],
                 ];
                 if ($data[0] === '' || $data[2] === '' || $data[3] === '') {
-                    flash('error', 'Event title, date, and location are required.');
+                    flash('error', 'Event title, date, time, and location are required.');
                     redirect('admin');
                 }
                 if ($id > 0) {
@@ -122,15 +126,25 @@ try {
 
             case 'event-delete':
                 $user = require_admin();
-                $stmt = db()->prepare('DELETE FROM events WHERE id = ? AND university_id = ?');
-                $stmt->execute([(int) $_POST['id'], $user['university_id']]);
-                flash('success', 'Event deleted.');
+                $id = (int) ($_POST['id'] ?? 0);
+                $stmt = db()->prepare('SELECT * FROM events WHERE id = ? AND university_id = ?');
+                $stmt->execute([$id, $user['university_id']]);
+                $row = $stmt->fetch();
+                if ($row) {
+                    $t = db()->prepare('INSERT INTO trash (table_name, row_id, data, deleted_by) VALUES (?, ?, ?, ?)');
+                    $t->execute(['events', $id, json_encode($row), $user['id']]);
+                    $stmt = db()->prepare('DELETE FROM events WHERE id = ? AND university_id = ?');
+                    $stmt->execute([$id, $user['university_id']]);
+                    flash('success', 'Event moved to trash.');
+                } else {
+                    flash('error', 'Event not found.');
+                }
                 redirect('admin');
 
             case 'rsvp':
                 $user = require_auth();
                 $eventId = (int) ($_POST['event_id'] ?? 0);
-                $stmt = db()->prepare('SELECT id FROM rsvps WHERE user_id = ? AND event_id = ?');
+                $stmt = db()->prepare('SELECT 1 FROM rsvps WHERE user_id = ? AND event_id = ?');
                 $stmt->execute([$user['id'], $eventId]);
                 if ($stmt->fetch()) {
                     $stmt = db()->prepare('DELETE FROM rsvps WHERE user_id = ? AND event_id = ?');
@@ -151,10 +165,9 @@ try {
                 $price = (float) ($_POST['price'] ?? 0);
                 $category = trim($_POST['category'] ?? '');
                 $quantity = max(1, (int) ($_POST['quantity'] ?? 1));
-                $listingKey = trim($_POST['listing_key'] ?? '');
 
-                if ($title === '' || $price <= 0 || $category === '' || $listingKey !== $user['listing_key']) {
-                    flash('error', 'Listing details are incomplete or the seller security key is wrong.');
+                if ($title === '' || $description === '' || $price <= 0 || $category === '') {
+                    flash('error', 'Please fill in all fields.');
                     redirect('marketplace');
                 }
 
@@ -182,6 +195,24 @@ try {
                 flash('success', 'Listing saved.');
                 redirect('marketplace');
 
+            case 'profile-save':
+                $user = require_auth();
+                $name = trim($_POST['name'] ?? '');
+                $photo = profile_photo_path($_FILES['profile_photo'] ?? []);
+                if ($name === '') {
+                    flash('error', 'Name cannot be empty.');
+                    redirect('dashboard');
+                }
+                if ($photo) {
+                    $stmt = db()->prepare('UPDATE users SET name = ?, profile_photo_path = ? WHERE id = ?');
+                    $stmt->execute([$name, $photo, $user['id']]);
+                } else {
+                    $stmt = db()->prepare('UPDATE users SET name = ? WHERE id = ?');
+                    $stmt->execute([$name, $user['id']]);
+                }
+                flash('success', 'Profile updated.');
+                redirect('dashboard');
+
             case 'listing-action':
                 $user = require_auth();
                 $id = (int) ($_POST['id'] ?? 0);
@@ -191,9 +222,18 @@ try {
                     $stmt->execute([$id, $user['id']]);
                     flash('success', 'Listing marked as sold.');
                 } elseif ($action === 'delete') {
-                    $stmt = db()->prepare('DELETE FROM listings WHERE id = ? AND seller_id = ?');
+                    $stmt = db()->prepare('SELECT * FROM listings WHERE id = ? AND seller_id = ?');
                     $stmt->execute([$id, $user['id']]);
-                    flash('success', 'Listing deleted.');
+                    $row = $stmt->fetch();
+                    if ($row) {
+                        $t = db()->prepare('INSERT INTO trash (table_name, row_id, data, deleted_by) VALUES (?, ?, ?, ?)');
+                        $t->execute(['listings', $id, json_encode($row), $user['id']]);
+                        $stmt = db()->prepare('DELETE FROM listings WHERE id = ? AND seller_id = ?');
+                        $stmt->execute([$id, $user['id']]);
+                        flash('success', 'Listing moved to trash.');
+                    } else {
+                        flash('error', 'Listing not found.');
+                    }
                 }
                 redirect('marketplace');
 
@@ -232,7 +272,7 @@ try {
                     }
                 }
                 flash('success', 'Cart updated.');
-                redirect('cart');
+                redirect('marketplace');
 
             case 'checkout':
                 $user = require_auth();
@@ -266,7 +306,8 @@ try {
                 }
                 db()->prepare('DELETE FROM cart_items WHERE user_id = ?')->execute([$user['id']]);
                 flash('success', 'Mobile payment processed for ' . money($total) . '.');
-                redirect('cart');
+                $after = ($_POST['after'] ?? 'marketplace') === 'events' ? 'events' : 'marketplace';
+                redirect($after);
 
             case 'message-send':
                 $user = require_auth();
@@ -292,10 +333,51 @@ try {
 
             case 'admin-listing-delete':
                 $user = require_admin();
-                $stmt = db()->prepare('DELETE FROM listings WHERE id = ? AND university_id = ?');
-                $stmt->execute([(int) $_POST['id'], $user['university_id']]);
-                flash('success', 'Listing removed from the hub.');
+                $id = (int) ($_POST['id'] ?? 0);
+                $stmt = db()->prepare('SELECT * FROM listings WHERE id = ? AND university_id = ?');
+                $stmt->execute([$id, $user['university_id']]);
+                $row = $stmt->fetch();
+                if ($row) {
+                    $t = db()->prepare('INSERT INTO trash (table_name, row_id, data, deleted_by) VALUES (?, ?, ?, ?)');
+                    $t->execute(['listings', $id, json_encode($row), $user['id']]);
+                    $stmt = db()->prepare('DELETE FROM listings WHERE id = ? AND university_id = ?');
+                    $stmt->execute([$id, $user['university_id']]);
+                    flash('success', 'Listing moved to trash.');
+                } else {
+                    flash('error', 'Listing not found.');
+                }
                 redirect('admin');
+
+            case 'trash-restore':
+                $user = require_admin();
+                $tid = (int) ($_POST['id'] ?? 0);
+                $stmt = db()->prepare('SELECT * FROM trash WHERE id = ?');
+                $stmt->execute([$tid]);
+                $trash = $stmt->fetch();
+                if ($trash) {
+                    $table = $trash['table_name'];
+                    $data = json_decode($trash['data'], true) ?: [];
+                    if (isset($data['id'])) unset($data['id']);
+                    if ($data) {
+                        $cols = array_keys($data);
+                        $placeholders = implode(',', array_fill(0, count($cols), '?'));
+                        $sql = 'INSERT INTO ' . $table . ' (' . implode(',', $cols) . ') VALUES (' . $placeholders . ')';
+                        $ins = db()->prepare($sql);
+                        $ins->execute(array_values($data));
+                    }
+                    db()->prepare('DELETE FROM trash WHERE id = ?')->execute([$tid]);
+                    flash('success', 'Item restored from trash.');
+                } else {
+                    flash('error', 'Trash item not found.');
+                }
+                redirect('trash');
+
+            case 'trash-delete':
+                $user = require_admin();
+                $tid = (int) ($_POST['id'] ?? 0);
+                db()->prepare('DELETE FROM trash WHERE id = ?')->execute([$tid]);
+                flash('success', 'Trash item permanently deleted.');
+                redirect('trash');
 
             case 'admin-domain':
                 require_admin();
@@ -312,8 +394,13 @@ try {
 } catch (PDOException $exception) {
     http_response_code(500);
     echo '<!doctype html><meta charset="utf-8"><title>UniHUB setup</title><link rel="stylesheet" href="assets/styles.css">';
-    echo '<main class="setup"><h1>UniHUB needs database setup</h1><p>Create a MySQL database named <strong>unihub</strong>, import <strong>database/schema.sql</strong>, then refresh this page.</p>';
-    echo '<p class="muted">Database error: ' . e($exception->getMessage()) . '</p></main>';
+    echo '<main class="setup"><h1>Database Connection Error</h1>';
+    echo '<p>Make sure your database is configured correctly in <strong>config/config.php</strong>:</p>';
+    echo '<ol><li>Create a MySQL database named <strong>unihub</strong></li>';
+    echo '<li>Import <strong>database/schema.sql</strong> into your database</li>';
+    echo '<li>Update DB_HOST, DB_USER, and DB_PASS in config/config.php with your credentials</li>';
+    echo '<li>Refresh this page</li></ol>';
+    echo '<p class="muted"><strong>Error details:</strong> ' . e($exception->getMessage()) . '</p></main>';
     exit;
 }
 
@@ -333,13 +420,13 @@ function render_header(string $title): void
     <header class="topbar">
         <a class="brand" href="<?= path($user ? 'dashboard' : 'home') ?>">UniHUB</a>
         <nav>
-            <?php if ($user && $user['verified_at']): ?>
+                <?php if ($user && $user['verified_at']): ?>
                 <a href="<?= path('dashboard') ?>">Dashboard</a>
                 <a href="<?= path('events') ?>">Events</a>
                 <a href="<?= path('marketplace') ?>">Marketplace</a>
                 <a href="<?= path('cart') ?>">Cart</a>
                 <?php if ($user['role'] === 'admin'): ?><a href="<?= path('admin') ?>">Admin</a><?php endif; ?>
-                <a href="<?= path('logout') ?>">Logout</a>
+                <a href="<?= path('logout') ?>" onclick="return confirm('Are you sure you want to log out?');">Logout</a>
             <?php else: ?>
                 <a href="<?= path('login') ?>">Login</a>
                 <a class="button small" href="<?= path('register') ?>">Sign up</a>
@@ -405,7 +492,7 @@ switch ($page) {
                 <?php if ($page === 'register'): ?>
                     <label>Name<input required name="name" autocomplete="name"></label>
                 <?php endif; ?>
-                <label>University email<input required type="email" name="email" autocomplete="email" placeholder="name@std.must.ac.ug"></label>
+                <label>University email<input required type="email" name="email" autocomplete="email" placeholder="(reg number)@std.must.ac.ug"></label>
                 <label>Password<input required type="password" name="password" minlength="6" autocomplete="<?= $page === 'register' ? 'new-password' : 'current-password' ?>"></label>
                 <button class="button" type="submit"><?= $page === 'register' ? 'Sign up' : 'Login' ?></button>
                 <p class="muted"><?= $page === 'register' ? 'Already registered?' : 'New to UniHUB?' ?>
@@ -413,9 +500,9 @@ switch ($page) {
                 </p>
             </form>
             <aside class="panel quiet">
-                <h2>Allowed starting domain</h2>
-                <p>Seed data includes Mbarara University of Science and Technology.</p>
-                <code>@std.must.ac.ug</code>
+                <h2>Your university email</h2>
+                <p>Sign up with your official university email address to join your campus hub.</p>
+                <code>eg. 2010bse045@std.must.ac.ug</code>
             </aside>
         </section>
         <?php
@@ -428,13 +515,18 @@ switch ($page) {
             redirect('login');
         }
         render_header('Verify email');
+        $otp_display = $_SESSION['otp_display'] ?? null;
         ?>
         <form class="panel narrow" method="post">
             <?= csrf_field() ?>
             <h1>Email verification</h1>
-            <p class="muted">Enter the six-digit OTP for <?= e($user['email']) ?>.</p>
-            <?php if (!empty($_SESSION['last_otp'])): ?>
-                <p class="local-otp">Local testing OTP: <strong><?= e($_SESSION['last_otp']) ?></strong></p>
+            <p class="muted">A verification code has been sent to <?= e($user['email']) ?>. Enter it below.</p>
+            <?php if ($otp_display): ?>
+                <p style="background: #fff3cd; padding: 12px; border-radius: 6px; border: 1px solid #ffc107; margin: 1rem 0;">
+                    <strong>Local development:</strong> Your verification code is: <code style="font-size: 1.2em; letter-spacing: 2px; font-weight: bold;"><?= e($otp_display) ?></code>
+                </p>
+            <?php else: ?>
+                <p class="info-message">Check your email (including spam folder) for the six-digit OTP.</p>
             <?php endif; ?>
             <label>OTP<input name="otp" inputmode="numeric" pattern="[0-9]{6}" required></label>
             <button class="button" type="submit">Verify email</button>
@@ -458,11 +550,27 @@ switch ($page) {
         render_header('Dashboard');
         ?>
         <section class="page-head">
+            <div class="profile-spot">
+                <?php if (!empty($user['profile_photo_path'])): ?>
+                    <img class="avatar" src="<?= e($user['profile_photo_path']) ?>" alt="Profile photo of <?= e($user['name']) ?>">
+                <?php else: ?>
+                    <div class="avatar placeholder"><?= e(strtoupper(substr($user['name'], 0, 1))) ?></div>
+                <?php endif; ?>
+            </div>
             <div>
                 <p class="eyebrow"><?= e($user['university_name']) ?></p>
                 <h1>Hello, <?= e($user['name']) ?></h1>
             </div>
             <span class="badge"><?= e($user['role']) ?></span>
+        </section>
+        <section class="panel profile-panel">
+            <h2>Account profile</h2>
+            <form class="grid-form" method="post" enctype="multipart/form-data" action="<?= path('profile-save') ?>">
+                <?= csrf_field() ?>
+                <label>Name<input name="name" value="<?= e($user['name']) ?>" required></label>
+                <label>Profile photo<input type="file" name="profile_photo" accept="image/*"></label>
+                <button class="button small" type="submit">Update profile</button>
+            </form>
         </section>
         <section class="stats">
             <div><strong><?= table_count('users', (int) $user['university_id']) ?></strong><span>Users</span></div>
@@ -509,9 +617,13 @@ switch ($page) {
         ?>
         <section class="page-head"><h1>Campus events</h1><a class="button secondary" href="<?= path('dashboard') ?>">Back</a></section>
         <section class="cards">
-            <?php foreach ($events as $event): ?>
-                <article class="card">
-                    <p class="eyebrow"><?= e(date('M j, Y H:i', strtotime($event['event_date']))) ?></p>
+            <?php foreach ($events as $event):
+                $eventDay = date('Y-m-d', strtotime($event['event_date']));
+                $today = date('Y-m-d');
+                $isToday = $eventDay === $today;
+            ?>
+                <article class="card<?= $isToday ? ' today' : '' ?>">
+                    <p class="eyebrow"><?= e(date('M j, Y H:i', strtotime($event['event_date']))) ?><?= $isToday ? ' · <span class="badge today">Today</span>' : '' ?></p>
                     <h2><?= e($event['title']) ?></h2>
                     <p><?= e($event['description']) ?></p>
                     <p class="muted"><?= e($event['location']) ?> · <?= (int) $event['rsvp_count'] ?> attending</p>
@@ -556,12 +668,11 @@ switch ($page) {
             <form class="grid-form" method="post" enctype="multipart/form-data" action="<?= path('listing-save') ?>">
                 <?= csrf_field() ?>
                 <label>Title<input name="title" required></label>
-                <label>Category<input name="category" required placeholder="Books, electronics, furniture"></label>
-                <label>Price<input name="price" required type="number" min="1" step="100"></label>
+                <label>Category<select name="category" required><option value="">Select a category</option><option value="Books">Books</option><option value="Electronics">Electronics</option><option value="Furniture">Furniture</option><option value="Clothing">Clothing</option><option value="Sports">Sports</option><option value="Other">Other</option></select></label>
+                <label>Price (UGX)<input name="price" required type="number" min="1" step="any"></label>
                 <label>Quantity<input name="quantity" type="number" min="1" value="1"></label>
-                <label>Seller key<input name="listing_key" required placeholder="<?= e($user['listing_key']) ?>"></label>
+                <label class="full">Description<textarea name="description" rows="3" required></textarea></label>
                 <label class="full">Images<input name="images[]" type="file" accept="image/*" multiple></label>
-                <label class="full">Description<textarea name="description" rows="3"></textarea></label>
                 <button class="button" type="submit">Publish listing</button>
             </form>
         </details>
@@ -587,7 +698,7 @@ switch ($page) {
                         <form class="inline-form" method="post" action="<?= path('cart-add') ?>">
                             <?= csrf_field() ?><input type="hidden" name="listing_id" value="<?= (int) $listing['id'] ?>">
                             <input class="qty" name="quantity" type="number" min="1" max="<?= (int) $listing['quantity'] ?>" value="1">
-                            <button class="button small">Add</button>
+                            <button class="button small">Add to cart</button>
                         </form>
                     <?php endif; ?>
                 </article>
@@ -633,15 +744,22 @@ switch ($page) {
                     <?= csrf_field() ?>
                     <input type="hidden" name="id" value="<?= (int) $listing['id'] ?>">
                     <label>Title<input name="title" value="<?= e($listing['title']) ?>" required></label>
-                    <label>Category<input name="category" value="<?= e($listing['category']) ?>" required></label>
-                    <label>Price<input name="price" value="<?= e((string) $listing['price']) ?>" required type="number" min="1"></label>
+                    <label>Category<select name="category" required><option value="Books" <?= $listing['category'] === 'Books' ? 'selected' : '' ?>>Books</option><option value="Electronics" <?= $listing['category'] === 'Electronics' ? 'selected' : '' ?>>Electronics</option><option value="Furniture" <?= $listing['category'] === 'Furniture' ? 'selected' : '' ?>>Furniture</option><option value="Clothing" <?= $listing['category'] === 'Clothing' ? 'selected' : '' ?>>Clothing</option><option value="Sports" <?= $listing['category'] === 'Sports' ? 'selected' : '' ?>>Sports</option><option value="Other" <?= $listing['category'] === 'Other' ? 'selected' : '' ?>>Other</option></select></label>
+                    <label>Price (UGX)<input name="price" value="<?= e((string) $listing['price']) ?>" required type="number" min="1" step="any"></label>
                     <label>Quantity<input name="quantity" value="<?= (int) $listing['quantity'] ?>" type="number" min="1"></label>
-                    <label>Seller key<input name="listing_key" required></label>
+                    <label class="full">Description<textarea name="description" rows="3" required><?= e($listing['description']) ?></textarea></label>
                     <label class="full">Replace images<input name="images[]" type="file" accept="image/*" multiple></label>
-                    <label class="full">Description<textarea name="description" rows="3"><?= e($listing['description']) ?></textarea></label>
                     <button class="button" type="submit">Save changes</button>
                 </form>
             </details>
+        <?php endif; ?>
+        <?php if ($listing['seller_id'] != $user['id'] && $listing['status'] === 'available'): ?>
+            <form class="panel" method="post" action="<?= path('cart-add') ?>">
+                <?= csrf_field() ?>
+                <input type="hidden" name="listing_id" value="<?= (int) $listing['id'] ?>">
+                <label>Quantity<input name="quantity" type="number" min="1" max="<?= (int) $listing['quantity'] ?>" value="1"></label>
+                <button class="button">Add to cart</button>
+            </form>
         <?php endif; ?>
         <section class="panel">
             <h2>Messages</h2>
@@ -674,6 +792,12 @@ switch ($page) {
         render_header('Cart');
         ?>
         <section class="page-head"><h1>Your cart</h1><strong><?= money($total) ?></strong></section>
+            <?php if (!$items): ?>
+                <section class="panel">
+                    <p class="muted">There is nothing on the cart.</p>
+                    <a class="button" href="<?= path('marketplace') ?>">Go to marketplace</a>
+                </section>
+            <?php else: ?>
         <form class="panel" method="post" action="<?= path('cart-update') ?>">
             <?= csrf_field() ?>
             <?php foreach ($items as $item): ?>
@@ -683,14 +807,19 @@ switch ($page) {
                     <input name="quantities[<?= (int) $item['cart_id'] ?>]" type="number" min="0" max="<?= (int) $item['quantity'] ?>" value="<?= (int) $item['cart_quantity'] ?>">
                 </div>
             <?php endforeach; ?>
-            <button class="button small secondary" type="submit">Update cart</button>
+            <button class="button small secondary" type="submit">Update cart and continue shopping</button>
         </form>
         <form class="panel narrow" method="post" action="<?= path('checkout') ?>">
             <?= csrf_field() ?>
             <h2>Mobile payment</h2>
             <label>Phone number<input name="phone" placeholder="+256..." required></label>
+            <label>After payment<select name="after">
+                <option value="marketplace">Marketplace</option>
+                <option value="events">Events</option>
+            </select></label>
             <button class="button" type="submit">Pay <?= money($total) ?></button>
         </form>
+            <?php endif; ?>
         <?php
         render_footer();
         break;
@@ -710,7 +839,7 @@ switch ($page) {
         $universities = $stmt->fetchAll();
         render_header('Admin');
         ?>
-        <section class="page-head"><h1>Admin panel</h1><span class="badge"><?= e($user['university_name']) ?></span></section>
+        <section class="page-head"><h1>Admin panel</h1><span class="badge"><?= e($user['university_name']) ?></span><a class="button small secondary" href="<?= path('trash') ?>">Trash</a></section>
         <section class="stats">
             <div><strong><?= count($users) ?></strong><span>Total users</span></div>
             <div><strong><?= count($events) ?></strong><span>Events</span></div>
@@ -722,7 +851,8 @@ switch ($page) {
                 <form class="stack" method="post" action="<?= path('event-save') ?>">
                     <?= csrf_field() ?>
                     <label>Title<input name="title" required></label>
-                    <label>Date<input name="event_date" type="datetime-local" required></label>
+                    <label>Date<input name="event_date" type="date" required></label>
+                    <label>Time<input name="event_time" type="time" required></label>
                     <label>Location<input name="location" required></label>
                     <label>Description<textarea name="description"></textarea></label>
                     <button class="button small" type="submit">Save event</button>
@@ -761,7 +891,8 @@ switch ($page) {
                     <?= csrf_field() ?>
                     <input type="hidden" name="id" value="<?= (int) $event['id'] ?>">
                     <input name="title" value="<?= e($event['title']) ?>" required>
-                    <input name="event_date" type="datetime-local" value="<?= e(date('Y-m-d\TH:i', strtotime($event['event_date']))) ?>" required>
+                    <input name="event_date" type="date" value="<?= e(date('Y-m-d', strtotime($event['event_date']))) ?>" required>
+                    <input name="event_time" type="time" value="<?= e(date('H:i', strtotime($event['event_date']))) ?>" required>
                     <input name="location" value="<?= e($event['location']) ?>" required>
                     <textarea name="description" rows="2"><?= e($event['description']) ?></textarea>
                     <button class="button small secondary">Save</button>
@@ -783,6 +914,37 @@ switch ($page) {
                     <button class="button small danger">Delete</button>
                 </form>
             <?php endforeach; ?>
+        </section>
+        <?php
+        render_footer();
+        break;
+
+    case 'trash':
+        $user = require_admin();
+        $stmt = db()->prepare('SELECT * FROM trash ORDER BY deleted_at DESC');
+        $stmt->execute([]);
+        $trash = $stmt->fetchAll();
+        render_header('Trash');
+        ?>
+        <section class="page-head"><h1>Trash</h1><a class="button secondary" href="<?= path('admin') ?>">Back</a></section>
+        <section class="panel">
+            <?php if (!$trash): ?>
+                <p class="muted">Trash is empty.</p>
+            <?php else: ?>
+                <?php foreach ($trash as $item): $data = json_decode($item['data'] ?? '[]', true) ?: []; ?>
+                    <div class="row-card">
+                        <div>
+                            <strong><?= e($item['table_name']) ?> <?= $item['row_id'] ? '#'.(int)$item['row_id'] : '' ?></strong>
+                            <div class="muted">Deleted at <?= e($item['deleted_at']) ?> by <?= e($item['deleted_by']) ?></div>
+                            <pre style="white-space:pre-wrap;word-break:break-word;margin:0.5rem 0;"><?= e(json_encode($data, JSON_PRETTY_PRINT)) ?></pre>
+                        </div>
+                        <div>
+                            <form method="post" action="<?= path('trash-restore') ?>" style="display:inline"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int) $item['id'] ?>"><button class="button small">Restore</button></form>
+                            <form method="post" action="<?= path('trash-delete') ?>" style="display:inline;margin-left:0.5rem;"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int) $item['id'] ?>"><button class="button small danger">Delete</button></form>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
         </section>
         <?php
         render_footer();

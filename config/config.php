@@ -3,9 +3,9 @@
 declare(strict_types=1);
 
 const APP_NAME = 'UniHUB';
-const APP_URL = 'http://localhost/UniHUB';
+const APP_URL = 'https://your-domain.com/unihub'; // Update to your deployment domain
 
-const DB_HOST = '127.0.0.1';
+const DB_HOST = 'localhost';
 const DB_NAME = 'unihub';
 const DB_USER = 'root';
 const DB_PASS = '';

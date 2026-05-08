@@ -1,3 +1,4 @@
 public/uploads/*
 !public/uploads/.gitkeep
-
+database/schema.sql
+config/config.php

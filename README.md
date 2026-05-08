@@ -31,9 +31,9 @@ All seeded accounts use password `password`.
 - Admin: `admin@std.must.ac.ug`
 - Member/seller: `seller@std.must.ac.ug`
 
-New users can register with emails ending in `@std.must.ac.ug` or `@students.mak.ac.ug`.
+New users can register with emails ending in `@std.must.ac.ug`.
 
-For local development, the generated OTP is displayed on the verification screen. In production, replace the local OTP display in `app/bootstrap.php` with `mail()` or SMTP delivery.
+For local development, the generated OTP is displayed on the verification screen. In production, we shall replace the local OTP display in `app/bootstrap.php` with `mail()` or SMTP delivery.
 
 ## Project Structure
 
@@ -41,7 +41,14 @@ For local development, the generated OTP is displayed on the verification screen
 - `public/index.php` is the front controller and page/action router.
 - `public/assets/styles.css` contains the responsive UI styles.
 - `public/uploads/` stores listing images.
-- `app/bootstrap.php` contains database connection, auth, CSRF, OTP, and shared helpers.
+- `app/bootstrap.php` loads the modular application layer.
+- `app/modules/database.php` contains the database connection helper.
+- `app/modules/security.php` contains escaping, routing, flash, and CSRF helpers.
+- `app/modules/auth.php` contains authentication and access control helpers.
+- `app/modules/universities.php` contains university lookup logic.
+- `app/modules/otp.php` contains OTP generation and delivery.
+- `app/modules/uploads.php` contains listing image upload handling.
+- `app/modules/formatting.php` contains display helpers like money formatting and counts.
 - `config/config.php` contains app and database configuration.
 - `database/schema.sql` creates tables and seed data.
 

@@ -26,6 +26,7 @@ CREATE TABLE users (
     role ENUM('member', 'admin') NOT NULL DEFAULT 'member',
     university_id INT NOT NULL,
     listing_key VARCHAR(64) NOT NULL,
+    profile_photo_path VARCHAR(255) NULL,
     verified_at DATETIME NULL,
     otp_code_hash VARCHAR(255) NULL,
     otp_expires_at DATETIME NULL,
@@ -107,18 +108,27 @@ CREATE TABLE mobile_payments (
     CONSTRAINT fk_payments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE mobile_payment_items (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    payment_id INT NOT NULL,
+    listing_id INT NOT NULL,
+    quantity INT NOT NULL DEFAULT 1,
+    confirmed TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_payment_items_payment FOREIGN KEY (payment_id) REFERENCES mobile_payments(id) ON DELETE CASCADE,
+    CONSTRAINT fk_payment_items_listing FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
+);
+
+CREATE TABLE trash (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    table_name VARCHAR(80) NOT NULL,
+    row_id INT NULL,
+    data JSON NOT NULL,
+    deleted_by INT NULL,
+    deleted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_trash_deleted_by FOREIGN KEY (deleted_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Add your universities here
 INSERT INTO universities (name, domain) VALUES
-('Mbarara University of Science and Technology', 'std.must.ac.ug'),
-('Makerere University', 'students.mak.ac.ug');
-
-INSERT INTO users (name, email, password_hash, role, university_id, listing_key, verified_at) VALUES
-('UniHUB Admin', 'admin@std.must.ac.ug', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llCkn9LLQ48NXRHP9.GS.', 'admin', 1, 'ADMIN-MUST-2026', NOW()),
-('Campus Seller', 'seller@std.must.ac.ug', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llCkn9LLQ48NXRHP9.GS.', 'member', 1, 'SELLER-MUST-2026', NOW());
-
-INSERT INTO events (university_id, created_by, title, description, event_date, location) VALUES
-(1, 1, 'Innovation Week Meetup', 'Student demos, startup talks, and networking for builders across campus.', DATE_ADD(NOW(), INTERVAL 6 DAY), 'Main Auditorium'),
-(1, 1, 'Career Readiness Clinic', 'CV reviews, internship guidance, and peer mock interviews.', DATE_ADD(NOW(), INTERVAL 12 DAY), 'Library Seminar Room');
-
-INSERT INTO listings (university_id, seller_id, title, description, price, category, quantity, image_paths) VALUES
-(1, 2, 'Engineering Drawing Set', 'Clean drawing board, T-square, and compass set for first-year engineering work.', 85000, 'Stationery', 2, JSON_ARRAY()),
-(1, 2, 'Used Scientific Calculator', 'Casio calculator in good condition with fresh batteries.', 45000, 'Electronics', 1, JSON_ARRAY());
+('Mbarara University of Science and Technology', 'std.must.ac.ug');
